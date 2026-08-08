@@ -15,6 +15,13 @@
 .env
 .env.*
 
+# Superseded Terraform modules, kept locally for reference only.
+# The observability stack they deploy now lives in argocd-apps/ and is managed
+# by ArgoCD. Their live/ wrappers are gone, so these can no longer be applied —
+# they are excluded so nobody mistakes them for the current source of truth.
+modules/monitoring/
+modules/logging/
+
 # Kubeconfigs
 kubeconfig
 *.kubeconfig
