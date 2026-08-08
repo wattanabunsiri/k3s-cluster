@@ -12,6 +12,7 @@ stack/
   monitoring.yaml          kube-prometheus-stack 65.5.1  (Prometheus/Grafana/Alertmanager)
   loki.yaml                loki 6.18.0                   (log store, SingleBinary)
   alloy.yaml               alloy 1.11.1                  (log collector DaemonSet)
+  alertmanager-config.yaml AlertmanagerConfig CR — Discord routing
   loki-datasource.yaml     ConfigMap wiring Loki into Grafana
 ```
 
@@ -46,15 +47,15 @@ kubectl -n monitoring create secret generic grafana-admin \
   --from-literal=admin-password='<YOUR_PASSWORD>'
 
 # 2. Discord webhook for Alertmanager.
-#    The key MUST be `webhook-url` — monitoring.yaml reads it from
-#    /etc/alertmanager/secrets/alertmanager-discord/webhook-url
+#    The key MUST be `webhook-url` — stack/alertmanager-config.yaml references
+#    it by name+key via discordConfigs[].apiURL (a SecretKeySelector).
 kubectl -n monitoring create secret generic alertmanager-discord \
   --from-literal=webhook-url='<YOUR_DISCORD_WEBHOOK_URL>'
 ```
 
-To rotate either value later, `kubectl delete secret` + recreate. Alertmanager
-picks up `webhook_url_file` changes without a restart; Grafana needs a pod
-restart to re-read its admin env vars.
+To rotate either value later, `kubectl delete secret` + recreate. The operator
+re-reads `alertmanager-discord` and regenerates the config on its own; Grafana
+needs a pod restart to re-read its admin env vars.
 
 > These replace what used to be inline plaintext in the Terraform Helm values.
 > If you want the secrets themselves in Git too, the next step is
@@ -76,16 +77,27 @@ These are load-bearing. Read before editing values.
    Loki 2.6.1, which fails Grafana's datasource health-check query.
 4. **Alertmanager's `receivers:` must declare `name: 'null'`.** The Watchdog
    route targets it; omit it and reconciliation fails with
-   `undefined receiver 'null'`.
-5. **Discord uses `discord_configs` + `webhook_url`/`webhook_url_file`.**
-   `webhook_configs` + `url` is the Slack-compatible shape and will not work.
+   `undefined receiver 'null'`. In the generated config the operator prefixes
+   CR receiver names, so these appear as `monitoring/discord/null`.
+5. **Discord uses `discord_configs` + `webhook_url`. Do not use
+   `webhook_url_file` in an inline `alertmanager.config`.** Alertmanager v0.27
+   supports it, but prometheus-operator v0.77.2 validates the inline config
+   *first* and its Discord parser only knows `webhook_url`. It fails with
+   `no discord webhook URL provided` and never creates the StatefulSet — so
+   Alertmanager silently doesn't exist. To keep the webhook out of Git, use the
+   `AlertmanagerConfig` CR (`stack/alertmanager-config.yaml`), whose `apiURL` is
+   a SecretKeySelector.
 6. **`lokiCanary` is top-level in loki 6.x.** Nesting it under `monitoring:`
    (as the old Terraform module did) is silently ignored, which is why canary
    pods kept running despite being "disabled".
-7. **`ServerSideApply=true` is required on the monitoring app.** The
-   `monitoring.coreos.com` CRDs exceed the 256KB `last-applied-configuration`
-   annotation limit that client-side apply uses; without it the sync fails with
-   `metadata.annotations: Too long`.
+7. **`skipCrds: true` on the monitoring app — do NOT enable
+   `ServerSideApply=true` here.** The chart's 10 CRDs (largest: `prometheuses`
+   at 777KB) blow past the 256KB client-side apply limit, so managing them
+   forces SSA. But ArgoCD v2.13.2 predates k8s v1.36 and its
+   structured-merge-diff dies on `.status.terminatingReplicas: field not
+   declared in schema`, wedging the app at sync status `Unknown` — at which
+   point it can no longer apply *anything*. Skipping CRDs avoids both. Upgrade
+   ArgoCD and this constraint goes away.
 8. A Grafana datasource save can 409-conflict when a browser tab and the
    sidecar ConfigMap watcher write concurrently. That is not DNS — don't chase
    it as one.
