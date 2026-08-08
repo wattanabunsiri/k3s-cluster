@@ -56,6 +56,24 @@ spec:
             passwordKey: admin-password
           service:
             type: ClusterIP
+          # Without this Grafana runs on emptyDir: anything created through the
+          # UI (dashboards, users, preferences, API keys) is lost on restart.
+          # Provisioned datasources survive regardless — they come from the
+          # sidecar ConfigMaps — but nothing you click is durable without a PVC.
+          persistence:
+            enabled: true
+            type: pvc
+            storageClassName: local-path
+            accessModes:
+              - ReadWriteOnce
+            size: 2Gi
+          # Must be Recreate once persistence is on. The chart defaults to
+          # RollingUpdate, which stands up the new pod before retiring the old
+          # one — but a ReadWriteOnce local-path volume can only be attached on
+          # one node, so the replacement hangs Pending on "volume already
+          # attached" and the rollout never finishes.
+          deploymentStrategy:
+            type: Recreate
           resources:
             requests:
               memory: 128Mi
@@ -71,6 +89,24 @@ spec:
         prometheus:
           prometheusSpec:
             retention: 7d
+            # `retention: 7d` is meaningless on emptyDir, which is the chart
+            # default — every pod restart starts the history from zero. This
+            # cluster's previous Prometheus racked up 59 OOM restarts, so that
+            # was not hypothetical.
+            #
+            # local-path is WaitForFirstConsumer: the PV is created on whichever
+            # node the pod first lands on and pins Prometheus there afterwards.
+            # Acceptable for a homelab; it does mean Prometheus won't reschedule
+            # if that node dies.
+            storageSpec:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: local-path
+                  accessModes:
+                    - ReadWriteOnce
+                  resources:
+                    requests:
+                      storage: 10Gi
             resources:
               requests:
                 memory: 300Mi

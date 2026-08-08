@@ -29,6 +29,17 @@ spec:
             replication_factor: 1
           storage:
             type: filesystem
+          # Without retention Loki never deletes anything. The PVC is 10Gi, so
+          # it just fills and then ingestion stops — a slow-fuse outage.
+          limits_config:
+            retention_period: 168h   # 7d, matching Prometheus
+          compactor:
+            working_directory: /var/loki/compactor
+            # retention_enabled is what actually makes the compactor delete
+            # expired chunks; retention_period alone only marks them.
+            retention_enabled: true
+            # Required by Loki 3.x whenever retention_enabled is true.
+            delete_request_store: filesystem
           schemaConfig:
             configs:
               - from: "2024-01-01"
