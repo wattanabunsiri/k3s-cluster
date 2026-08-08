@@ -19,6 +19,23 @@ spec:
     targetRevision: 65.5.1
     helm:
       releaseName: monitoring
+      # Don't let ArgoCD manage the 10 monitoring.coreos.com CRDs.
+      #
+      # They are already installed at this exact chart version. Managing them
+      # here forces ServerSideApply (the largest, prometheuses, is 777KB — well
+      # over the 256KB client-side apply annotation limit), and SSA's
+      # structured-merge-diff breaks against this cluster: ArgoCD v2.13.2
+      # predates k8s v1.36 and dies with
+      #   .status.terminatingReplicas: field not declared in schema
+      # which leaves the app permanently sync-status Unknown and unable to
+      # apply anything at all.
+      #
+      # Trade-off: bumping targetRevision will NOT upgrade CRDs. Apply them by
+      # hand first — this is standard for kube-prometheus-stack, since Helm
+      # never upgrades CRDs either:
+      #   kubectl apply --server-side --force-conflicts \
+      #     -f https://raw.githubusercontent.com/prometheus-community/helm-charts/kube-prometheus-stack-<VER>/charts/kube-prometheus-stack/charts/crds/crds/<file>.yaml
+      skipCrds: true
       values: |
         grafana:
           # GOTCHA 1: Grafana's image is Alpine/musl. musl's resolver walks the
@@ -115,10 +132,10 @@ spec:
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
-      # Required. The monitoring.coreos.com CRDs are far larger than the 256KB
-      # last-applied-configuration annotation that client-side apply uses;
-      # without this the sync fails with "metadata.annotations: Too long".
-      - ServerSideApply=true
+      # NOTE: deliberately NOT ServerSideApply=true. See skipCrds above — with
+      # CRDs excluded nothing here exceeds the client-side apply limit, and
+      # avoiding SSA sidesteps the ArgoCD-2.13-vs-k8s-1.36 schema mismatch that
+      # otherwise wedges this app at sync status Unknown.
     retry:
       limit: 5
       backoff:
