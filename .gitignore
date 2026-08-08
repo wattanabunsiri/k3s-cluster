@@ -1,0 +1,23 @@
+# Terraform / Terragrunt state.
+# Never commit these: live/k3s-cluster/terraform.tfstate embeds the k3s cluster
+# join token, which is enough to add a node to the cluster.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.tfstate.lock.info
+.terragrunt-cache/
+
+# Local overrides and variable files that tend to hold credentials.
+*.auto.tfvars
+*.tfvars
+!example.tfvars
+.env
+.env.*
+
+# Kubeconfigs
+kubeconfig
+*.kubeconfig
+
+# macOS
+.DS_Store

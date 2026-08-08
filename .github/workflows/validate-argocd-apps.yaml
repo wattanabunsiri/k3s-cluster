@@ -1,0 +1,46 @@
+name: Validate ArgoCD apps
+
+# ArgoCD auto-syncs argocd-apps/stack/ straight onto the live cluster on every
+# push to main. There is no manual gate after merge, so this PR check is the
+# only thing standing between a broken manifest and production.
+on:
+  pull_request:
+    paths:
+      - 'argocd-apps/**'
+      - '.github/workflows/validate-argocd-apps.yaml'
+      - '.github/scripts/validate_argocd_apps.py'
+  # Also run on main so a direct push (bypassing PR) is still reported on.
+  push:
+    branches: [main]
+    paths:
+      - 'argocd-apps/**'
+      - '.github/workflows/validate-argocd-apps.yaml'
+      - '.github/scripts/validate_argocd_apps.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: helm template --dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          # Pinned to the Helm 3.x line that ArgoCD v2.13.2 bundles, so a chart
+          # that renders here renders identically when ArgoCD syncs it.
+          version: v3.16.4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+
+      - name: Render every Application through helm template
+        run: python3 .github/scripts/validate_argocd_apps.py argocd-apps

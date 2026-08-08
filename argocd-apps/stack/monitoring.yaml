@@ -1,0 +1,145 @@
+---
+# kube-prometheus-stack: Prometheus + Grafana + Alertmanager + exporters.
+# Chart 65.5.1 is pinned deliberately — known-good on this cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  annotations:
+    # Wave 0: this creates the `monitoring` namespace that later waves depend on.
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: 65.5.1
+    helm:
+      releaseName: monitoring
+      values: |
+        grafana:
+          # GOTCHA 1: Grafana's image is Alpine/musl. musl's resolver walks the
+          # full ndots:5 search path and intermittently returns "no such host"
+          # for cluster-internal names. ndots:2 fixes it.
+          # This is `grafana.dnsConfig`, NOT `grafana.podDnsConfig` — the latter
+          # is not in this chart's schema and is silently ignored.
+          dnsPolicy: ClusterFirst
+          dnsConfig:
+            options:
+              - name: ndots
+                value: "2"
+          # Admin password comes from a pre-created Secret, never from Git.
+          # See argocd-apps/README.md for the one-time creation command.
+          admin:
+            existingSecret: grafana-admin
+            userKey: admin-user
+            passwordKey: admin-password
+          service:
+            type: ClusterIP
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 50m
+            limits:
+              memory: 256Mi
+          sidecar:
+            datasources:
+              enabled: true
+              label: grafana_datasource
+              labelValue: "1"
+
+        prometheus:
+          prometheusSpec:
+            retention: 7d
+            resources:
+              requests:
+                memory: 300Mi
+                cpu: 100m
+              limits:
+                # Raised from the old Terraform module's 700Mi: that pod had
+                # racked up 59 OOM restarts before this migration.
+                memory: 1Gi
+
+        alertmanager:
+          enabled: true
+          alertmanagerSpec:
+            # prometheus-operator mounts each listed Secret at
+            # /etc/alertmanager/secrets/<name>/<key>
+            secrets:
+              - alertmanager-discord
+            resources:
+              requests:
+                memory: 64Mi
+              limits:
+                memory: 128Mi
+          config:
+            global:
+              resolve_timeout: 5m
+            route:
+              receiver: 'discord'
+              group_by: ['alertname', 'namespace']
+              group_wait: 30s
+              group_interval: 5m
+              repeat_interval: 4h
+              routes:
+                # GOTCHA 4: the Watchdog alert is routed to a receiver literally
+                # named 'null'. That receiver MUST also be declared in
+                # `receivers:` below or reconciliation dies with
+                # "undefined receiver 'null'".
+                - receiver: 'null'
+                  matchers:
+                    - alertname = "Watchdog"
+            receivers:
+              - name: 'null'
+              - name: 'discord'
+                # GOTCHA 5: Discord needs `discord_configs` + `webhook_url`.
+                # `webhook_configs` + `url` is the Slack-compatible shape and
+                # will not work here.
+                # webhook_url_file reads the URL from the mounted Secret so the
+                # webhook never lands in Git. Alertmanager v0.27.0 supports it.
+                discord_configs:
+                  - webhook_url_file: /etc/alertmanager/secrets/alertmanager-discord/webhook-url
+                    send_resolved: true
+
+        kube-state-metrics:
+          resources:
+            requests:
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+
+        prometheus-node-exporter:
+          resources:
+            requests:
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+
+        prometheusOperator:
+          resources:
+            requests:
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      # Required. The monitoring.coreos.com CRDs are far larger than the 256KB
+      # last-applied-configuration annotation that client-side apply uses;
+      # without this the sync fails with "metadata.annotations: Too long".
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

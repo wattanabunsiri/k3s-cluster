@@ -1,0 +1,134 @@
+---
+# Grafana Alloy — the log collector that replaces Promtail (Promtail is EOL).
+# Runs as a DaemonSet: one pod per node, each tailing only its own node's pods.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: alloy
+  namespace: argocd
+  annotations:
+    # Wave 2: Loki (wave 1) must be accepting pushes first.
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: alloy
+    targetRevision: 1.11.1
+    helm:
+      releaseName: alloy
+      values: |
+        controller:
+          type: daemonset
+
+        rbac:
+          # Alloy needs cluster-scoped read on pods + pods/log to discover and
+          # tail them through the API server.
+          create: true
+
+        alloy:
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 50m
+            limits:
+              memory: 192Mi
+
+          extraEnv:
+            # discovery.kubernetes needs the node name to filter to local pods.
+            # The chart already injects K8S_NODE_NAME (and overrides HOSTNAME) to
+            # spec.nodeName, but both are chart internals that could be renamed.
+            # Declaring our own is one line and keeps the config self-contained.
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+
+          configMap:
+            create: true
+            content: |-
+              // ---- discovery -------------------------------------------------
+              // Field-select to this node only. Without this every DaemonSet pod
+              // discovers every pod cluster-wide and each log line gets shipped
+              // three times over.
+              discovery.kubernetes "pods" {
+                role = "pod"
+
+                selectors {
+                  role  = "pod"
+                  field = "spec.nodeName=" + sys.env("NODE_NAME")
+                }
+              }
+
+              // ---- label shaping ---------------------------------------------
+              // Keep cardinality low: namespace/pod/container/node only.
+              discovery.relabel "pods" {
+                targets = discovery.kubernetes.pods.targets
+
+                rule {
+                  source_labels = ["__meta_kubernetes_namespace"]
+                  target_label  = "namespace"
+                }
+
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_name"]
+                  target_label  = "pod"
+                }
+
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_container_name"]
+                  target_label  = "container"
+                }
+
+                rule {
+                  source_labels = ["__meta_kubernetes_node_name"]
+                  target_label  = "node"
+                }
+
+                rule {
+                  source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+                  target_label  = "app"
+                }
+              }
+
+              // ---- collection --------------------------------------------------
+              // Tails via the Kubernetes API rather than mounting /var/log, so no
+              // hostPath mount and no container-runtime coupling.
+              loki.source.kubernetes "pods" {
+                targets    = discovery.relabel.pods.output
+                forward_to = [loki.process.pods.receiver]
+              }
+
+              loki.process "pods" {
+                stage.static_labels {
+                  values = {
+                    cluster = "k3s-homelab",
+                  }
+                }
+
+                forward_to = [loki.write.default.receiver]
+              }
+
+              // ---- shipping ----------------------------------------------------
+              loki.write "default" {
+                endpoint {
+                  url = "http://loki.logging.svc.cluster.local:3100/loki/api/v1/push"
+                }
+              }
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: logging
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

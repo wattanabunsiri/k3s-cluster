@@ -1,0 +1,40 @@
+---
+# App-of-apps parent. Apply this ONCE by hand:
+#   kubectl apply -f argocd-apps/root.yaml
+# After that, every change is just `git push` — ArgoCD reconciles from Git.
+#
+# This app watches argocd-apps/stack/ and applies whatever is in there.
+# It deliberately does NOT watch argocd-apps/ itself, so it never manages
+# (and never prunes) its own definition.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    # Cascade-delete children if the root app is ever deleted.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/wattanabunsiri/k3s-cluster.git
+    targetRevision: main
+    path: argocd-apps/stack
+    directory:
+      recurse: true
+      include: '*.yaml'
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
