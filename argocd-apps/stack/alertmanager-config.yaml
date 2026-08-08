@@ -1,0 +1,47 @@
+---
+# Alertmanager routing, as an AlertmanagerConfig CR rather than inline Helm
+# `alertmanager.config`.
+#
+# Why: prometheus-operator v0.77.2 validates inline config before it will create
+# the Alertmanager StatefulSet, and its Discord parser only understands
+# `webhook_url` — not `webhook_url_file`. An inline config therefore forces the
+# webhook into Git in plaintext, which is a non-starter for a public repo.
+# This CR's `apiURL` is a SecretKeySelector, so the operator reads the webhook
+# straight out of the `alertmanager-discord` Secret and it never touches Git.
+#
+# Referenced by monitoring.yaml via alertmanagerSpec.alertmanagerConfiguration,
+# which makes it the *global* config. That matters: selecting it with
+# alertmanagerConfigSelector instead would make the operator prefix every route
+# with a `namespace=monitoring` matcher, silently dropping alerts from every
+# other namespace.
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: discord
+  namespace: monitoring
+  annotations:
+    # Wave 1: the monitoring app (wave 0) installs this CRD and the namespace.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  route:
+    receiver: 'discord'
+    groupBy: ['alertname', 'namespace']
+    groupWait: 30s
+    groupInterval: 5m
+    repeatInterval: 4h
+    routes:
+      # Watchdog is a heartbeat that fires constantly by design — black-hole it
+      # into the 'null' receiver, which must still be declared below.
+      - receiver: 'null'
+        matchers:
+          - name: alertname
+            value: Watchdog
+            matchType: '='
+  receivers:
+    - name: 'null'
+    - name: 'discord'
+      discordConfigs:
+        - apiURL:
+            name: alertmanager-discord
+            key: webhook-url
+          sendResolved: true

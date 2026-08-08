@@ -66,43 +66,25 @@ spec:
         alertmanager:
           enabled: true
           alertmanagerSpec:
-            # prometheus-operator mounts each listed Secret at
-            # /etc/alertmanager/secrets/<name>/<key>
-            secrets:
-              - alertmanager-discord
+            # Routing lives in the `discord` AlertmanagerConfig CR
+            # (stack/alertmanager-config.yaml), NOT in an inline `config:` block
+            # here.
+            #
+            # GOTCHA 5 (extended): Discord needs `discord_configs` +
+            # `webhook_url`. Alertmanager itself also accepts
+            # `webhook_url_file`, but prometheus-operator v0.77.2 validates the
+            # inline config first and its Discord parser only knows
+            # `webhook_url` — it fails with "no discord webhook URL provided"
+            # and never creates the StatefulSet. Naming a CR here sidesteps
+            # that: the CR references the Secret by key, so the webhook stays
+            # out of Git.
+            alertmanagerConfiguration:
+              name: discord
             resources:
               requests:
                 memory: 64Mi
               limits:
                 memory: 128Mi
-          config:
-            global:
-              resolve_timeout: 5m
-            route:
-              receiver: 'discord'
-              group_by: ['alertname', 'namespace']
-              group_wait: 30s
-              group_interval: 5m
-              repeat_interval: 4h
-              routes:
-                # GOTCHA 4: the Watchdog alert is routed to a receiver literally
-                # named 'null'. That receiver MUST also be declared in
-                # `receivers:` below or reconciliation dies with
-                # "undefined receiver 'null'".
-                - receiver: 'null'
-                  matchers:
-                    - alertname = "Watchdog"
-            receivers:
-              - name: 'null'
-              - name: 'discord'
-                # GOTCHA 5: Discord needs `discord_configs` + `webhook_url`.
-                # `webhook_configs` + `url` is the Slack-compatible shape and
-                # will not work here.
-                # webhook_url_file reads the URL from the mounted Secret so the
-                # webhook never lands in Git. Alertmanager v0.27.0 supports it.
-                discord_configs:
-                  - webhook_url_file: /etc/alertmanager/secrets/alertmanager-discord/webhook-url
-                    send_resolved: true
 
         kube-state-metrics:
           resources:
