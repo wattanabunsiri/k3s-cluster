@@ -122,6 +122,34 @@ spec:
               limits:
                 memory: 128Mi
 
+        # ── k3s control-plane scrape jobs: all disabled ──────────────
+        # k3s runs the scheduler, controller-manager and kube-proxy inside the
+        # single `k3s server` process, not as standalone pods. Each does export
+        # metrics, but bound to 127.0.0.1 (:10259, :10257, :10249), so a
+        # Prometheus pod on another node can never reach them. Left enabled
+        # they produce permanently-down targets and fire KubeSchedulerDown /
+        # KubeControllerManagerDown / KubeProxyDown as critical alerts forever.
+        #
+        # Disabling each also removes its alert rule group, not just the
+        # ServiceMonitor.
+        #
+        # To collect these for real instead, add to the k3s server unit:
+        #   --kube-scheduler-arg=bind-address=0.0.0.0
+        #   --kube-controller-manager-arg=bind-address=0.0.0.0
+        #   --kube-proxy-arg=metrics-bind-address=0.0.0.0
+        # then re-enable below and point .endpoints at the master IP. That
+        # exposes the metrics on the LAN and needs a k3s restart.
+        kubeScheduler:
+          enabled: false
+        kubeControllerManager:
+          enabled: false
+        kubeProxy:
+          enabled: false
+        # This cluster's datastore is sqlite (/var/lib/rancher/k3s/server/db/
+        # state.db) — there is no etcd at all, and nothing on :2381.
+        kubeEtcd:
+          enabled: false
+
         kube-state-metrics:
           resources:
             requests:
