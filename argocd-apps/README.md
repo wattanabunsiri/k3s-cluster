@@ -90,14 +90,16 @@ These are load-bearing. Read before editing values.
 6. **`lokiCanary` is top-level in loki 6.x.** Nesting it under `monitoring:`
    (as the old Terraform module did) is silently ignored, which is why canary
    pods kept running despite being "disabled".
-7. **`skipCrds: true` on the monitoring app — do NOT enable
-   `ServerSideApply=true` here.** The chart's 10 CRDs (largest: `prometheuses`
-   at 777KB) blow past the 256KB client-side apply limit, so managing them
-   forces SSA. But ArgoCD v2.13.2 predates k8s v1.36 and its
+7. **`ServerSideApply=true` is required on the monitoring app — and needs
+   ArgoCD ≥ v3.** The chart's 10 CRDs (largest: `prometheuses` at 777KB) blow
+   past the 256KB client-side apply annotation limit, so managing them requires
+   SSA. On ArgoCD v2.13.2 that was impossible: it predates k8s v1.36 and its
    structured-merge-diff dies on `.status.terminatingReplicas: field not
    declared in schema`, wedging the app at sync status `Unknown` — at which
-   point it can no longer apply *anything*. Skipping CRDs avoids both. Upgrade
-   ArgoCD and this constraint goes away.
+   point it can no longer apply *anything*. Worked around with `skipCrds: true`
+   until ArgoCD was upgraded to v3.5.0, which fixed it properly. **If you ever
+   roll ArgoCD back below v3, you must re-add `skipCrds: true` at the same
+   time.**
 8. A Grafana datasource save can 409-conflict when a browser tab and the
    sidecar ConfigMap watcher write concurrently. That is not DNS — don't chase
    it as one.
