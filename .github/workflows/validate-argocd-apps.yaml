@@ -31,9 +31,12 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v4
         with:
-          # Pinned to the Helm 3.x line that ArgoCD v2.13.2 bundles, so a chart
-          # that renders here renders identically when ArgoCD syncs it.
-          version: v3.16.4
+          # Must match the Helm that ArgoCD's repo-server actually renders with,
+          # or this job can pass on a chart that then fails to sync. Check with:
+          #   kubectl exec -n argocd deploy/argocd-repo-server -- helm version
+          # ArgoCD v3.5.0 ships Helm v4.2.1. (Was v3.16.4 for ArgoCD v2.13.2 —
+          # bump this whenever you upgrade ArgoCD.)
+          version: v4.2.1
 
       - uses: actions/setup-python@v5
         with:
