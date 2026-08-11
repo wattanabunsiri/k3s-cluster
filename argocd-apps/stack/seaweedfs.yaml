@@ -37,7 +37,7 @@ spec:
           # SeaweedFS replication is its own layer, separate from k8s replicas.
           # Setting 001 with a single volume server makes writes fail with
           # "no writable volumes" because the extra copy can never be placed.
-          defaultReplication: "000"
+          defaultReplication: "001"
           data:
             # PVC rather than the chart's default hostPath: hostPath is tied to
             # one node's filesystem and outside k8s's storage lifecycle, so a
@@ -57,7 +57,7 @@ spec:
         # ── VOLUME SERVER: where object bytes actually live ──────────
         volume:
           enabled: true
-          replicas: 1
+          replicas: 2
           dataDirs:
             - name: data1
               type: "persistentVolumeClaim"
@@ -85,7 +85,7 @@ spec:
         filer:
           enabled: true
           replicas: 1
-          defaultReplicaPlacement: "000"
+          defaultReplicaPlacement: "001"
           data:
             type: "persistentVolumeClaim"
             size: "1Gi"
