@@ -33,6 +33,7 @@ spec:
         master:
           enabled: true
           replicas: 1
+          volumeSizeLimitMB: 500
           # "<datacenter><rack><server>" — 000 means one copy, no replication.
           # SeaweedFS replication is its own layer, separate from k8s replicas.
           # Setting 001 with a single volume server makes writes fail with
