@@ -14,6 +14,7 @@ stack/
   alloy.yaml               alloy 1.11.1                  (log collector DaemonSet)
   alertmanager-config.yaml AlertmanagerConfig CR — Discord routing
   loki-datasource.yaml     ConfigMap wiring Loki into Grafana
+  seaweedfs.yaml           seaweedfs 4.41.0 — S3 object storage lab (ns: storage)
 ```
 
 `root.yaml` points at `stack/` only, never at itself — so it can't prune its
@@ -29,6 +30,7 @@ Children apply in order; each wave waits for the previous to go Healthy.
 | 1 | loki | must accept pushes before a collector starts sending |
 | 2 | alloy | ships to Loki |
 | 3 | loki-datasource | needs the `monitoring` namespace *and* a live Loki |
+| 4 | seaweedfs | independent of the above; last so it can't delay observability |
 
 ## Required secrets — create these BEFORE bootstrapping
 
@@ -53,9 +55,39 @@ kubectl -n monitoring create secret generic alertmanager-discord \
   --from-literal=webhook-url='<YOUR_DISCORD_WEBHOOK_URL>'
 ```
 
-To rotate either value later, `kubectl delete secret` + recreate. The operator
-re-reads `alertmanager-discord` and regenerates the config on its own; Grafana
-needs a pod restart to re-read its admin env vars.
+```bash
+# 3. SeaweedFS S3 credentials, in the `storage` namespace.
+#    The key MUST be named `seaweedfs_s3_config` — it is mounted at /etc/sw and
+#    read via -config=/etc/sw/seaweedfs_s3_config.
+#    This generates strong random keys, creates the Secret, and saves a copy
+#    locally for the aws CLI — without printing anything to your terminal.
+kubectl create namespace storage --dry-run=client -o yaml | kubectl apply -f -
+
+ADMIN_AK=$(openssl rand -hex 10)
+ADMIN_SK=$(openssl rand -base64 30 | tr -d '/+=' | cut -c1-40)
+READ_AK=$(openssl rand -hex 10)
+READ_SK=$(openssl rand -base64 30 | tr -d '/+=' | cut -c1-40)
+
+cat > ~/.seaweedfs-s3-creds <<EOF
+AWS_ACCESS_KEY_ID=$ADMIN_AK
+AWS_SECRET_ACCESS_KEY=$ADMIN_SK
+READONLY_ACCESS_KEY_ID=$READ_AK
+READONLY_SECRET_ACCESS_KEY=$READ_SK
+EOF
+chmod 600 ~/.seaweedfs-s3-creds
+
+kubectl -n storage create secret generic seaweedfs-s3-config \
+  --from-literal=seaweedfs_s3_config="{\"identities\":[
+    {\"name\":\"admin\",\"credentials\":[{\"accessKey\":\"$ADMIN_AK\",\"secretKey\":\"$ADMIN_SK\"}],
+     \"actions\":[\"Admin\",\"Read\",\"Write\",\"List\",\"Tagging\"]},
+    {\"name\":\"readonly\",\"credentials\":[{\"accessKey\":\"$READ_AK\",\"secretKey\":\"$READ_SK\"}],
+     \"actions\":[\"Read\",\"List\"]}]}"
+```
+
+To rotate any of these later, `kubectl delete secret` + recreate. The
+prometheus-operator re-reads `alertmanager-discord` and regenerates its config
+on its own; Grafana needs a pod restart to re-read its admin env vars; the
+SeaweedFS S3 gateway needs a pod restart to re-read its config file.
 
 > These replace what used to be inline plaintext in the Terraform Helm values.
 > If you want the secrets themselves in Git too, the next step is
@@ -103,6 +135,21 @@ These are load-bearing. Read before editing values.
 8. A Grafana datasource save can 409-conflict when a browser tab and the
    sidecar ConfigMap watcher write concurrently. That is not DNS — don't chase
    it as one.
+9. **Any chart that generates secrets with Helm's `lookup` is unsafe under
+   ArgoCD — always pass an `existing*Secret` instead.** SeaweedFS is the live
+   example: `seaweedfs.getOrGeneratePassword` (`shared/_helpers.tpl:277`) calls
+   `lookup` to reuse the current Secret, but ArgoCD renders with
+   `helm template`, which has no cluster access. `lookup` returns nothing, so
+   it falls through to `randAlphaNum` and mints new credentials. Worse, the
+   Secret is a `pre-install,pre-upgrade` hook, so it is *excluded from the
+   diff* — the app still reports Synced/Healthy while your S3 keys silently
+   change on every sync. Setting `s3.existingConfigSecret` bypasses the whole
+   path. Check any new chart for `lookup` before trusting its secret handling.
+10. **SeaweedFS splits data from metadata.** The Volume Server holds the object
+   bytes; the Filer holds filenames, paths and bucket contents. Both need their
+   own PVC — if only the Volume Server is persisted, the bytes survive a
+   restart but nothing can find them, which is indistinguishable from data
+   loss.
 
 ## Validation
 

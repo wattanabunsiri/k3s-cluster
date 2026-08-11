@@ -1,0 +1,162 @@
+---
+# SeaweedFS — S3-compatible object storage lab.
+#
+# Request path:
+#   aws-cli --S3 API--> S3 Gateway --> Filer (metadata/paths)
+#                                       --> Master (topology/allocation)
+#                                       --> Volume Server (actual bytes)
+#                                            --> PVC --> local-path --> node disk
+#
+# Deliberately NOT highly available: single replica everywhere, replication
+# "000", no TLS, no Ingress, no object lock. Those are later labs.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: seaweedfs
+  namespace: argocd
+  annotations:
+    # Wave 4: independent of the observability stack, so it syncs last and
+    # never delays Prometheus/Loki coming up.
+    argocd.argoproj.io/sync-wave: "4"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://seaweedfs.github.io/seaweedfs/helm
+    chart: seaweedfs
+    targetRevision: 4.41.0
+    helm:
+      releaseName: seaweedfs
+      values: |
+        # ── MASTER: cluster topology and volume allocation ───────────
+        master:
+          enabled: true
+          replicas: 1
+          # "<datacenter><rack><server>" — 000 means one copy, no replication.
+          # SeaweedFS replication is its own layer, separate from k8s replicas.
+          # Setting 001 with a single volume server makes writes fail with
+          # "no writable volumes" because the extra copy can never be placed.
+          defaultReplication: "000"
+          data:
+            # PVC rather than the chart's default hostPath: hostPath is tied to
+            # one node's filesystem and outside k8s's storage lifecycle, so a
+            # rescheduled pod silently comes up with an empty directory.
+            type: "persistentVolumeClaim"
+            size: "1Gi"
+            storageClass: "local-path"
+          logs:
+            type: "emptyDir"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+
+        # ── VOLUME SERVER: where object bytes actually live ──────────
+        volume:
+          enabled: true
+          replicas: 1
+          dataDirs:
+            - name: data1
+              type: "persistentVolumeClaim"
+              size: "10Gi"
+              storageClass: "local-path"
+              # 0 = no cap; the volume server fills the PVC as needed.
+              maxVolumes: 0
+          # Empty means the .idx files live inside the data dir above, so the
+          # index is on the same PVC as the data it describes. Splitting them
+          # risks index and data diverging across a restart.
+          idx: {}
+          logs:
+            type: "emptyDir"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+
+        # ── FILER: filenames, paths, directory tree, bucket contents ──
+        # Metadata only — no object bytes. Losing it means the data still
+        # exists on disk but nothing can find it, which is the same as
+        # losing it. Hence its own PVC.
+        filer:
+          enabled: true
+          replicas: 1
+          defaultReplicaPlacement: "000"
+          data:
+            type: "persistentVolumeClaim"
+            size: "1Gi"
+            storageClass: "local-path"
+          logs:
+            type: "emptyDir"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+
+        # ── S3 GATEWAY: the AWS-compatible API surface ────────────────
+        s3:
+          enabled: true
+          replicas: 1
+          enableAuth: true
+
+          # CRITICAL for GitOps. Without this the chart generates credentials
+          # via seaweedfs.getOrGeneratePassword, which calls Helm's `lookup` to
+          # reuse the existing Secret (shared/_helpers.tpl:277). ArgoCD renders
+          # with `helm template` and has no cluster access, so `lookup` returns
+          # nothing and it falls through to randAlphaNum — minting NEW access
+          # keys on every sync. The Secret is a pre-install/pre-upgrade hook, so
+          # it won't show as OutOfSync; your keys just silently change under you
+          # every time this app syncs.
+          #
+          # Pointing at a Secret we create once disables that generation path
+          # entirely (guard at s3/s3-secret.yaml:1).
+          # The Secret must contain a key named exactly `seaweedfs_s3_config` —
+          # it's mounted at /etc/sw and read via -config=/etc/sw/seaweedfs_s3_config
+          # (s3/s3-deployment.yaml:137). See argocd-apps/README.md.
+          existingConfigSecret: seaweedfs-s3-config
+
+          # Undocumented in the chart's values.yaml but implemented in
+          # shared/post-install-bucket-hook.yaml — a post-install Job that runs
+          # `weed shell` to create buckets. Idempotent: it lists first and skips
+          # buckets that already exist.
+          createBuckets:
+            - name: devops-lab
+              anonymousRead: false
+              # Keeps every version of an object, so an overwrite or delete is
+              # recoverable. Note there is no lifecycle rule yet — on a 10Gi
+              # volume, repeatedly overwriting large objects will fill the disk.
+              versioning: Enabled
+
+          # ClusterIP only: reachable inside the cluster, no LAN exposure.
+          # Use `kubectl port-forward` to drive it from your laptop.
+          service:
+            type: ClusterIP
+          logs:
+            type: "emptyDir"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: storage
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
